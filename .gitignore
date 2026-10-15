@@ -1,0 +1,10 @@
+# Build outputs
+*.exe
+
+# Runtime state
+state.ini
+
+# Root copies of sources (canonical in src/)
+/*.cs
+
+__pycache__/
