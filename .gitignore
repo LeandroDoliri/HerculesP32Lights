@@ -3,8 +3,6 @@
 
 # Runtime state
 state.ini
-
-# Root copies of sources (canonical in src/)
-/*.cs
+state.ini.tmp
 
 __pycache__/

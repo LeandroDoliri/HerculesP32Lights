@@ -7,30 +7,27 @@ Aplicación nativa para Windows (C# .NET) diseñada para encender, apagar y sinc
 ## 📁 Estructura del Proyecto
 
 ```text
-C:\Users\leand\HerculesP32Lights\
+HerculesP32Lights\
 │
-├── HerculesTray.exe            # Aplicación residente en la bandeja del sistema (junto al reloj)
-├── HerculesToggle.exe          # Ventana del interruptor visual (anclable a la barra de tareas)
-├── app.ico                     # Icono de la aplicación
-├── icon_on.ico                 # Icono de estado encendido
-├── icon_off.ico                # Icono de estado apagado
-├── state.ini                   # Archivo de persistencia de estado actual
-├── build.cmd                   # Script de doble clic para recompilar el proyecto
+├── HerculesTray.exe            # (generado) App residente en la bandeja del sistema
+├── HerculesToggle.exe          # (generado) Ventana del interruptor visual (anclable)
+├── state.ini                   # (generado) Modo actual; solo lo escribe la bandeja
+├── build.cmd                   # Doble clic para recompilar el proyecto
 ├── README.md                   # Esta documentación
 │
 ├── src\                        # Código fuente C# (.NET 4.8 / csc.exe)
-│   ├── HerculesMidi.cs         # Comunicación WinMM MIDI y disparo de F12 a Traktor
-│   ├── HerculesTray.cs         # Servicio de bandeja, menú contextual y guardián de blackout
-│   └── HerculesToggle.cs       # Formulario del interruptor visual con botón ON/OFF
+│   ├── HerculesMidi.cs         # Comunicación WinMM MIDI y refresco F12 de Traktor
+│   ├── HerculesShared.cs       # Estado (state.ini) y órdenes entre interruptor y bandeja
+│   ├── HerculesTray.cs         # Bandeja, menú contextual y guardián de blackout
+│   └── HerculesToggle.cs       # Ventana del interruptor con botón ON/OFF
 │
-├── assets\                     # Recursos gráficos y generador
+├── assets\                     # Iconos (se embeben en los .exe al compilar)
 │   ├── app.ico                 # Icono principal multi-resolución
 │   ├── icon_on.ico             # Icono encendido (colores neón)
 │   ├── icon_off.ico            # Icono apagado (escala de grises)
 │   └── generate_icons.py       # Script en Python (Pillow) para generar los iconos ICO
 │
 ├── docs\                       # Documentación técnica y especificaciones
-│   ├── README.md               # Copia de la documentación general
 │   ├── midi_spec.md            # Mapeo completo de canales, notas, pads y colores
 │   ├── Hercules-P32-scripts.js # Mapeo de referencia oficial de Mixxx (JavaScript)
 │   └── Hercules-P32-DJ.midi.xml# Mapeo XML de referencia de Mixxx
@@ -38,9 +35,10 @@ C:\Users\leand\HerculesP32Lights\
 └── scripts\                    # Scripts de utilidad y herramientas de diagnóstico
     ├── build.ps1               # Script de compilación usando csc.exe
     ├── install_shortcuts.ps1   # Generador de accesos directos (Escritorio y Menú Inicio)
+    ├── hercules_midi.py        # Módulo común de acceso MIDI para los scripts
     ├── list_midi.py            # Diagnóstico: enumera dispositivos MIDI en Windows
     ├── test_lights.py          # Diagnóstico: prueba de ráfaga ON/OFF en hardware
-    └── set_lights.py           # CLI: permite fijar estados o colores desde consola
+    └── set_lights.py           # CLI: set_lights.py [on|off] [dj|purple|blue|red]
 ```
 
 ---
@@ -55,9 +53,11 @@ C:\Users\leand\HerculesP32Lights\
   - 🌑 **Modo Apagado:** Apaga todas las luces del controlador al instante.
   - Clic derecho: Abre un menú con selector de modos, modo lámpara opcional, inicio con Windows y salida.
 
-- **Interruptor Visual de Barra de Tareas (`HerculesToggle.exe`):**  
-  Una ventana compacta con un botón grande interactivo que muestra el estado actual. Al estar abierta, su icono aparece en la barra de tareas y puede anclarse haciendo:  
+- **Interruptor Visual de Barra de Tareas (`HerculesToggle.exe`):**
+  Una ventana compacta con un botón grande que muestra el estado actual y se mantiene sincronizada con la bandeja. No toca el MIDI: le envía la orden a `HerculesTray.exe` y, si la bandeja no está abierta, la inicia. Puede anclarse haciendo:
   *Clic derecho en su icono en la barra de tareas ➡️ "Anclar a la barra de tareas"*.
+
+- **Línea de comandos:** `HerculesTray.exe /off`, `/normal` o `/toggle` (si la bandeja ya está corriendo, le reenvía la orden).
 
 ---
 
@@ -65,13 +65,19 @@ C:\Users\leand\HerculesP32Lights\
 
 El problema habitual al apagar las luces de un controlador es que el software de DJ no sabe que el hardware se apagó, por lo que al volver a encenderlo no reenvía las luces de las pistas que ya estaban cargadas.
 
-Este proyecto lo resuelve con integración nativa:
-1. Al pulsar **Apagar**: Se envía un Note-Off masivo y se activa un temporizador silencioso que evita que el hardware entre en su molesto "Vegas Mode" tras 5 minutos de inactividad.
+Este proyecto lo resuelve así:
+1. Al pulsar **Apagar**: se apagan todos los LEDs y un guardián los vuelve a apagar cada 3,5 s. Eso evita que el hardware entre en su "Vegas Mode" tras 5 minutos de inactividad y tapa las luces que el programa de DJ siga enviando (por ejemplo, el parpadeo de Play puede verse un instante).
 2. Al pulsar **Encender**:
-   - Se desactiva el guardián de apagado.
-   - La aplicación envía en segundo plano la pulsación de la tecla **`F12`** directamente a **Traktor Pro 4**.
-   - Traktor ejecuta su comando nativo **`Send Monitor State`** y reenvía inmediatamente toda su memoria (Play, Cue, Hotcues en sus colores reales, loops y vúmetros).  
-   **Las luces regresan exactamente a como estaban antes de apagarlas.**
+   - Se desactiva el guardián de apagado (y se borran las luces del modo lámpara, si venías de ahí).
+   - Si **Traktor Pro 4** está abierto, la aplicación le envía la tecla **`F12`** solo a Traktor (nunca a otra ventana).
+   - Con `F12` asignado en Traktor a **`Send Monitor State`**, Traktor reenvía su estado (Play, Cue, Hotcues en sus colores, loops y vúmetros) y las luces vuelven a reflejar las pistas cargadas.
+
+> **Requisito:** en Traktor, *Preferences ➡️ Controller Manager*, asigná `F12` al comando **Send Monitor State**. Con otros programas (DJUCED, Mixxx) las luces vuelven cuando el programa las reenvía.
+
+Otros detalles:
+- Si la controladora se desconecta y se vuelve a conectar, la bandeja reaplica el modo Apagado o Lámpara automáticamente.
+- Si no encuentra la controladora o el puerto MIDI está ocupado, la bandeja muestra un aviso.
+- Al salir de la bandeja estando en Apagado, el guardián deja de correr: a los 5 minutos el hardware puede volver al Vegas Mode. Al volver a abrirla se retoma el modo guardado.
 
 ---
 
@@ -79,9 +85,9 @@ Este proyecto lo resuelve con integración nativa:
 
 El proyecto no requiere Visual Studio ni gestores de paquetes pesados. Utiliza el compilador nativo de Windows `csc.exe` (.NET Framework 4.8):
 
-1. Abre la carpeta `C:\Users\leand\HerculesP32Lights`.
+1. Abre la carpeta del proyecto.
 2. Haz doble clic en **`build.cmd`** (o ejecuta en PowerShell `scripts\build.ps1`).
-3. Los ejecutables `HerculesTray.exe` y `HerculesToggle.exe` se compilarán en menos de 2 segundos.
+3. Los ejecutables `HerculesTray.exe` y `HerculesToggle.exe` se generan en la raíz del proyecto, con los iconos embebidos. Si alguna de las dos apps está abierta, el script la cierra antes de compilar.
 
 ---
 
@@ -90,5 +96,5 @@ El proyecto no requiere Visual Studio ni gestores de paquetes pesados. Utiliza e
 Si necesitas restaurar los accesos directos en el Escritorio o Menú Inicio:
 Ejecuta en PowerShell:
 ```powershell
-& "C:\Users\leand\HerculesP32Lights\scripts\install_shortcuts.ps1"
+.\scripts\install_shortcuts.ps1
 ```

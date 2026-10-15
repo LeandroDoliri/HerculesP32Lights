@@ -80,4 +80,5 @@ El hardware mapea internamente 4 capas por deck:
 
 ## 6. Comportamiento del Firmware (Vegas Mode / LightShow)
 - Tras 5 minutos de inactividad en la conexión USB, el firmware del controlador inicia automáticamente el **Vegas Mode** (LightShow animado).
-- Para evitar que este modo se active cuando las luces están en modo "Apagado", la aplicación envía una señal periódica de apagado que mantiene el hardware en reposo total sin interferir con las aplicaciones de música.
+- Para evitar que este modo se active cuando las luces están en modo "Apagado", la aplicación vuelve a enviar Note-Off cada 3,5 s a las notas `0x01`–`0x63` de los canales 1 a 3 (el barrido completo de los 6 canales se hace al cambiar de modo o al reconectar la controladora).
+- El rango `0x01`–`0x63` es el mismo que usa el mapeo oficial de Mixxx al apagar la controladora (`P32.shutdown`).

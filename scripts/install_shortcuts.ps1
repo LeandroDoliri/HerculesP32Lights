@@ -1,11 +1,14 @@
 $proj = Split-Path -Parent $PSScriptRoot
-if (-not $proj) { $proj = "C:\Users\leand\HerculesP32Lights" }
 
 $WshShell = New-Object -comObject WScript.Shell
 $DesktopPath = [Environment]::GetFolderPath("Desktop")
 $StartMenuPath = [Environment]::GetFolderPath("Programs")
 $TargetExe = "$proj\HerculesToggle.exe"
-$IconPath = "$proj\app.ico"
+
+if (-not (Test-Path $TargetExe)) {
+    Write-Error "No se encontro $TargetExe. Compila primero con build.cmd."
+    exit 1
+}
 
 Write-Host "Creando accesos directos..." -ForegroundColor Cyan
 
@@ -13,7 +16,7 @@ Write-Host "Creando accesos directos..." -ForegroundColor Cyan
 $DesktopShortcut = $WshShell.CreateShortcut("$DesktopPath\Luces Hercules P32.lnk")
 $DesktopShortcut.TargetPath = $TargetExe
 $DesktopShortcut.WorkingDirectory = $proj
-$DesktopShortcut.IconLocation = "$IconPath, 0"
+$DesktopShortcut.IconLocation = "$TargetExe, 0"
 $DesktopShortcut.Description = "Prender y apagar luces del controlador Hercules P32 DJ"
 $DesktopShortcut.Save()
 
@@ -21,7 +24,7 @@ $DesktopShortcut.Save()
 $StartShortcut = $WshShell.CreateShortcut("$StartMenuPath\Luces Hercules P32.lnk")
 $StartShortcut.TargetPath = $TargetExe
 $StartShortcut.WorkingDirectory = $proj
-$StartShortcut.IconLocation = "$IconPath, 0"
+$StartShortcut.IconLocation = "$TargetExe, 0"
 $StartShortcut.Description = "Prender y apagar luces del controlador Hercules P32 DJ"
 $StartShortcut.Save()
 

@@ -1,5 +1,4 @@
 $proj = Split-Path -Parent $PSScriptRoot
-if (-not $proj) { $proj = "C:\Users\leand\HerculesP32Lights" }
 
 $src = "$proj\src"
 $assets = "$proj\assets"
@@ -14,22 +13,27 @@ Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host " Compilando Hercules P32 Lights Controller   " -ForegroundColor Cyan
 Write-Host "=============================================" -ForegroundColor Cyan
 
-# Check if HerculesTray is running and stop it temporarily to avoid file lock
-$wasRunning = $false
-$runningProc = Get-Process -Name "HerculesTray" -ErrorAction SilentlyContinue
-if ($runningProc) {
-    Write-Host "Deteniendo HerculesTray temporalmente para compilar..." -ForegroundColor Yellow
-    $wasRunning = $true
-    Stop-Process -Name "HerculesTray" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 600
+# Detiene las apps temporalmente para que los .exe no queden bloqueados
+$trayWasRunning = $false
+foreach ($name in @("HerculesTray", "HerculesToggle")) {
+    $running = Get-Process -Name $name -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Host "Deteniendo $name temporalmente para compilar..." -ForegroundColor Yellow
+        if ($name -eq "HerculesTray") { $trayWasRunning = $true }
+        Stop-Process -Name $name -Force -ErrorAction SilentlyContinue
+    }
 }
+Start-Sleep -Milliseconds 600
 
-# Ensure icon is present
-$icon = "$proj\app.ico"
-if (-not (Test-Path $icon)) { $icon = "$assets\app.ico" }
+# Los iconos van embebidos en los .exe: no hace falta copiarlos junto a ellos
+$icon = "$assets\app.ico"
+$resources = @(
+    "/resource:$assets\icon_on.ico,HerculesP32.icon_on.ico",
+    "/resource:$assets\icon_off.ico,HerculesP32.icon_off.ico"
+)
 
 Write-Host "[1/2] Compilando HerculesTray.exe..." -ForegroundColor Yellow
-& $csc /target:winexe /win32icon:"$icon" /out:"$proj\HerculesTray.exe" "$src\HerculesTray.cs" "$src\HerculesMidi.cs"
+& $csc /nologo /target:winexe /win32icon:"$icon" @resources /out:"$proj\HerculesTray.exe" "$src\HerculesTray.cs" "$src\HerculesMidi.cs" "$src\HerculesShared.cs"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fallo la compilacion de HerculesTray.exe"
@@ -37,14 +41,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[2/2] Compilando HerculesToggle.exe..." -ForegroundColor Yellow
-& $csc /target:winexe /win32icon:"$icon" /out:"$proj\HerculesToggle.exe" "$src\HerculesToggle.cs" "$src\HerculesMidi.cs"
+& $csc /nologo /target:winexe /win32icon:"$icon" /out:"$proj\HerculesToggle.exe" "$src\HerculesToggle.cs" "$src\HerculesShared.cs"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fallo la compilacion de HerculesToggle.exe"
     exit $LASTEXITCODE
 }
 
-if ($wasRunning) {
+if ($trayWasRunning) {
     Write-Host "Reiniciando HerculesTray.exe..." -ForegroundColor Cyan
     Start-Process -FilePath "$proj\HerculesTray.exe"
 }

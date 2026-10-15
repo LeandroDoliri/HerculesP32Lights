@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -9,13 +11,6 @@ namespace HerculesP32
 {
     public class HerculesTrayApp : ApplicationContext
     {
-        public enum AppMode
-        {
-            Normal,     // Program controls lights dynamically
-            Off,        // All lights turned off (blackout)
-            Demo        // Optional static decorative lamp mode
-        }
-
         private NotifyIcon notifyIcon;
         private ContextMenuStrip contextMenu;
         private ToolStripMenuItem itemToggle;
@@ -30,68 +25,87 @@ namespace HerculesP32
         private Icon iconOn;
         private Icon iconOff;
 
-        private AppMode currentMode = AppMode.Normal;
-        private string demoColor = "dj";
-        private string appDir;
-        private string stateFile;
+        // Se leen desde el hilo MIDI, por eso son volatile
+        private volatile AppMode currentMode = AppMode.Normal;
+        private volatile string demoColor = "dj";
 
-        private EventWaitHandle toggleEvent;
+        private EventWaitHandle[] commandEvents;
         private Thread listenerThread;
-        private System.Windows.Forms.Timer offKeepAliveTimer;
         private volatile bool running = true;
         private SynchronizationContext uiContext;
+
+        // Todo el MIDI corre en un único hilo, en orden, para no trabar la interfaz
+        private readonly BlockingCollection<Action> midiQueue = new BlockingCollection<Action>();
+        private Thread midiThread;
+        private System.Threading.Timer watchdogTimer;
+        private int watchdogPending;
+        private bool deviceWasConnected;
+
         private static Mutex singleInstanceMutex;
 
         private const string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string APP_NAME = "HerculesP32Tray";
+        private const int WATCHDOG_INTERVAL_MS = 3500;
 
-        public HerculesTrayApp()
+        public HerculesTrayApp(AppMode? forcedMode)
         {
-            appDir = AppDomain.CurrentDomain.BaseDirectory;
-            stateFile = Path.Combine(appDir, "state.ini");
-
             uiContext = WindowsFormsSynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 
             LoadIcons();
-            LoadState();
+            AppMode mode;
+            string color;
+            HerculesShared.LoadState(out mode, out color);
+            currentMode = mode;
+            demoColor = color;
 
-            offKeepAliveTimer = new System.Windows.Forms.Timer();
-            offKeepAliveTimer.Interval = 3500;
-            offKeepAliveTimer.Tick += (s, e) =>
+            midiThread = new Thread(MidiWorker);
+            midiThread.IsBackground = true;
+            midiThread.Start();
+
+            commandEvents = new EventWaitHandle[]
             {
-                if (currentMode == AppMode.Off)
-                {
-                    HerculesMidi.ClearAllLights();
-                }
+                new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventToggle),
+                new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventOff),
+                new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventNormal),
             };
 
-            bool createdNew;
-            toggleEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Global\HerculesP32ToggleEvent", out createdNew);
-
-            listenerThread = new Thread(ListenForToggleRequests);
+            listenerThread = new Thread(ListenForCommands);
             listenerThread.IsBackground = true;
             listenerThread.Start();
 
             InitializeTray();
 
-            ApplyMode(currentMode);
+            if (forcedMode.HasValue)
+            {
+                // Iniciada por el interruptor: aplica la orden como si la hubiera pedido el usuario
+                SetMode(forcedMode.Value);
+            }
+            else
+            {
+                // Al arrancar no se pide refresco a Traktor (evita mandar F12 al iniciar Windows)
+                ApplyMode(currentMode, currentMode, false);
+            }
+
+            watchdogTimer = new System.Threading.Timer(s => QueueWatchdog(), null, WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS);
+        }
+
+        private static Icon LoadEmbeddedIcon(string name)
+        {
+            try
+            {
+                using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("HerculesP32." + name))
+                {
+                    if (s != null) return new Icon(s);
+                }
+            }
+            catch { }
+            return SystemIcons.Application;
         }
 
         private void LoadIcons()
         {
-            try
-            {
-                string onPath = Path.Combine(appDir, "icon_on.ico");
-                string offPath = Path.Combine(appDir, "icon_off.ico");
-
-                iconOn = File.Exists(onPath) ? new Icon(onPath) : SystemIcons.Application;
-                iconOff = File.Exists(offPath) ? new Icon(offPath) : SystemIcons.Application;
-            }
-            catch
-            {
-                iconOn = SystemIcons.Application;
-                iconOff = SystemIcons.Application;
-            }
+            iconOn = LoadEmbeddedIcon("icon_on.ico");
+            iconOff = LoadEmbeddedIcon("icon_off.ico");
         }
 
         private void InitializeTray()
@@ -146,78 +160,140 @@ namespace HerculesP32
             }
         }
 
-        private void ListenForToggleRequests()
+        private void ListenForCommands()
         {
             while (running)
             {
                 try
                 {
-                    if (toggleEvent.WaitOne(400))
-                    {
-                        if (!running) break;
-                        uiContext.Post(state => ToggleLights(), null);
-                    }
+                    int idx = WaitHandle.WaitAny(commandEvents, 400);
+                    if (!running) break;
+                    if (idx == 0) uiContext.Post(state => ToggleLights(), null);
+                    else if (idx == 1) uiContext.Post(state => SetMode(AppMode.Off), null);
+                    else if (idx == 2) uiContext.Post(state => SetMode(AppMode.Normal), null);
                 }
                 catch (ThreadAbortException) { break; }
+                catch (ObjectDisposedException) { break; }
                 catch { }
             }
         }
 
+        private void MidiWorker()
+        {
+            foreach (Action action in midiQueue.GetConsumingEnumerable())
+            {
+                try { action(); }
+                catch { }
+            }
+        }
+
+        private void EnqueueMidi(Action action)
+        {
+            try { midiQueue.Add(action); }
+            catch (InvalidOperationException) { } // la cola ya se cerró al salir
+        }
+
+        /// <summary>
+        /// Guardián periódico: en modo Apagado mantiene las luces apagadas (y evita el
+        /// Vegas Mode); al reconectar la controladora vuelve a aplicar el modo actual.
+        /// </summary>
+        private void QueueWatchdog()
+        {
+            if (!running) return;
+            if (Interlocked.CompareExchange(ref watchdogPending, 1, 0) != 0) return;
+
+            EnqueueMidi(() =>
+            {
+                try
+                {
+                    bool connected = HerculesMidi.IsConnected();
+                    bool reconnected = connected && !deviceWasConnected;
+                    deviceWasConnected = connected;
+                    if (!connected) return;
+
+                    AppMode mode = currentMode;
+                    if (mode == AppMode.Off) HerculesMidi.ClearAllLights(reconnected);
+                    else if (mode == AppMode.Demo && reconnected) HerculesMidi.SetStaticDemoLights(demoColor);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref watchdogPending, 0);
+                }
+            });
+        }
+
         public void ToggleLights()
         {
-            if (currentMode == AppMode.Off)
-            {
-                SetMode(AppMode.Normal);
-            }
-            else
-            {
-                SetMode(AppMode.Off);
-            }
+            SetMode(currentMode == AppMode.Off ? AppMode.Normal : AppMode.Off);
         }
 
         public void SetMode(AppMode mode)
         {
+            AppMode previous = currentMode;
             currentMode = mode;
-            ApplyMode(currentMode);
-            SaveState();
+            ApplyMode(mode, previous, true);
+            HerculesShared.SaveState(currentMode, demoColor);
             UpdateUI();
         }
 
         public void SetDemoMode(string color)
         {
+            if (!HerculesShared.IsValidDemoColor(color)) return;
             demoColor = color;
-            currentMode = AppMode.Demo;
-            ApplyMode(currentMode);
-            SaveState();
-            UpdateUI();
+            SetMode(AppMode.Demo);
         }
 
-        private void ApplyMode(AppMode mode)
+        private void ApplyMode(AppMode mode, AppMode previous, bool userInitiated)
         {
-            try
+            string color = demoColor;
+            EnqueueMidi(() =>
             {
+                bool ok = true;
                 if (mode == AppMode.Off)
                 {
-                    HerculesMidi.ClearAllLights();
-                    offKeepAliveTimer.Start();
+                    ok = HerculesMidi.ClearAllLights();
                 }
                 else if (mode == AppMode.Normal)
                 {
-                    offKeepAliveTimer.Stop();
-                    // Refresca automáticamente las luces de Traktor
-                    new Thread(() =>
+                    // Si venía del modo lámpara, borra esas luces antes de devolverle el control al programa
+                    if (previous == AppMode.Demo) HerculesMidi.ClearAllLights();
+                    if (userInitiated)
                     {
                         Thread.Sleep(80);
                         HerculesMidi.TriggerTraktorRefresh();
-                    }).Start();
+                    }
                 }
                 else if (mode == AppMode.Demo)
                 {
-                    offKeepAliveTimer.Stop();
-                    HerculesMidi.SetStaticDemoLights(demoColor);
+                    ok = HerculesMidi.SetStaticDemoLights(color);
                 }
-            }
+
+                deviceWasConnected = HerculesMidi.IsConnected();
+
+                if (!ok && userInitiated)
+                {
+                    string error = HerculesMidi.LastError;
+                    uiContext.Post(state => ShowWarning(error), null);
+                }
+            });
+        }
+
+        private void ShowWarning(string message)
+        {
+            if (notifyIcon == null || string.IsNullOrEmpty(message)) return;
+            try { notifyIcon.ShowBalloonTip(4000, "Hercules P32", message, ToolTipIcon.Warning); }
             catch { }
+        }
+
+        private static string ColorDisplayName(string color)
+        {
+            switch (color)
+            {
+                case "purple": return "Púrpura";
+                case "blue": return "Azul";
+                case "red": return "Rojo";
+                default: return "DJ";
+            }
         }
 
         private void UpdateUI()
@@ -228,24 +304,20 @@ namespace HerculesP32
                 {
                     notifyIcon.Icon = iconOn;
                     notifyIcon.Text = "Hercules P32: Luces NORMALES (Programa)";
-                    itemModeNormal.Checked = true;
-                    itemModeOff.Checked = false;
                 }
                 else if (currentMode == AppMode.Off)
                 {
                     notifyIcon.Icon = iconOff;
                     notifyIcon.Text = "Hercules P32: Luces APAGADAS";
-                    itemModeNormal.Checked = false;
-                    itemModeOff.Checked = true;
                 }
                 else
                 {
                     notifyIcon.Icon = iconOn;
-                    notifyIcon.Text = "Hercules P32: Modo Lámpara (" + demoColor + ")";
-                    itemModeNormal.Checked = false;
-                    itemModeOff.Checked = false;
+                    notifyIcon.Text = "Hercules P32: Modo Lámpara (" + ColorDisplayName(demoColor) + ")";
                 }
 
+                itemModeNormal.Checked = currentMode == AppMode.Normal;
+                itemModeOff.Checked = currentMode == AppMode.Off;
                 itemColorDj.Checked = (currentMode == AppMode.Demo && demoColor == "dj");
                 itemColorPurple.Checked = (currentMode == AppMode.Demo && demoColor == "purple");
                 itemColorBlue.Checked = (currentMode == AppMode.Demo && demoColor == "blue");
@@ -272,110 +344,85 @@ namespace HerculesP32
             try
             {
                 bool current = IsAutoStartEnabled();
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RUN_KEY, true))
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RUN_KEY))
                 {
-                    if (key != null)
+                    if (current)
                     {
-                        if (current)
-                        {
-                            key.DeleteValue(APP_NAME, false);
-                            itemAutoStart.Checked = false;
-                        }
-                        else
-                        {
-                            string exePath = Application.ExecutablePath;
-                            key.SetValue(APP_NAME, "\"" + exePath + "\"");
-                            itemAutoStart.Checked = true;
-                        }
+                        key.DeleteValue(APP_NAME, false);
+                    }
+                    else
+                    {
+                        key.SetValue(APP_NAME, "\"" + Application.ExecutablePath + "\"");
                     }
                 }
             }
-            catch { }
-        }
-
-        private void LoadState()
-        {
-            try
+            catch (Exception ex)
             {
-                if (File.Exists(stateFile))
-                {
-                    string[] lines = File.ReadAllLines(stateFile);
-                    foreach (string line in lines)
-                    {
-                        string[] parts = line.Split('=');
-                        if (parts.Length == 2)
-                        {
-                            string k = parts[0].Trim();
-                            string v = parts[1].Trim();
-                            if (k == "Mode")
-                            {
-                                if (v == "Off") currentMode = AppMode.Off;
-                                else if (v == "Demo") currentMode = AppMode.Demo;
-                                else currentMode = AppMode.Normal;
-                            }
-                            if (k == "DemoColor") demoColor = v;
-                        }
-                    }
-                }
-                else
-                {
-                    currentMode = AppMode.Normal;
-                }
+                ShowWarning("No se pudo cambiar el inicio con Windows: " + ex.Message);
             }
-            catch { currentMode = AppMode.Normal; }
-        }
-
-        private void SaveState()
-        {
-            try
-            {
-                string content = string.Format("Mode={0}\nDemoColor={1}\n", currentMode, demoColor);
-                File.WriteAllText(stateFile, content);
-            }
-            catch { }
+            itemAutoStart.Checked = IsAutoStartEnabled();
         }
 
         private void ExitApp()
         {
             running = false;
-            try
-            {
-                if (offKeepAliveTimer != null) offKeepAliveTimer.Stop();
-                if (toggleEvent != null) toggleEvent.Set();
-            }
-            catch { }
+
+            if (watchdogTimer != null) watchdogTimer.Dispose();
+            midiQueue.CompleteAdding();
+            // Deja terminar el último envío MIDI pendiente (con un tope)
+            if (midiThread != null) midiThread.Join(2000);
 
             if (notifyIcon != null)
             {
                 notifyIcon.Visible = false;
                 notifyIcon.Dispose();
             }
-            Application.Exit();
+            if (contextMenu != null) contextMenu.Dispose();
+            if (iconOn != null && iconOn != SystemIcons.Application) iconOn.Dispose();
+            if (iconOff != null && iconOff != SystemIcons.Application) iconOff.Dispose();
+
+            ExitThread();
+        }
+
+        private static AppMode? ParseModeArg(string[] args)
+        {
+            if (args.Length == 0) return null;
+            string a = args[0].ToLower();
+            if (a == "/off") return AppMode.Off;
+            if (a == "/normal" || a == "/on") return AppMode.Normal;
+            return null;
         }
 
         [STAThread]
         public static void Main(string[] args)
         {
             bool createdNew;
-            singleInstanceMutex = new Mutex(true, @"Global\HerculesP32TrayMutex", out createdNew);
+            singleInstanceMutex = new Mutex(true, HerculesShared.TrayMutexName, out createdNew);
+
+            string cmd = args.Length > 0 ? args[0].ToLower() : "";
+            AppMode? forcedMode = ParseModeArg(args);
 
             if (!createdNew)
             {
-                if (args.Length > 0 && args[0].ToLower() == "/toggle")
-                {
-                    try
-                    {
-                        EventWaitHandle evt = EventWaitHandle.OpenExisting(@"Global\HerculesP32ToggleEvent");
-                        evt.Set();
-                    }
-                    catch { }
-                }
+                // Ya hay una bandeja corriendo: le reenvía la orden
+                if (cmd == "/toggle") HerculesShared.SignalTray(HerculesShared.EventToggle);
+                else if (forcedMode == AppMode.Off) HerculesShared.SignalTray(HerculesShared.EventOff);
+                else if (forcedMode == AppMode.Normal) HerculesShared.SignalTray(HerculesShared.EventNormal);
                 return;
+            }
+
+            if (cmd == "/toggle")
+            {
+                AppMode saved;
+                string color;
+                HerculesShared.LoadState(out saved, out color);
+                forcedMode = saved == AppMode.Off ? AppMode.Normal : AppMode.Off;
             }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new HerculesTrayApp());
+            Application.Run(new HerculesTrayApp(forcedMode));
+            GC.KeepAlive(singleInstanceMutex);
         }
     }
 }
