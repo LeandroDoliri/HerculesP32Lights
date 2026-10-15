@@ -33,7 +33,7 @@ $resources = @(
 )
 
 Write-Host "[1/2] Compilando HerculesTray.exe..." -ForegroundColor Yellow
-& $csc /nologo /target:winexe /win32icon:"$icon" @resources /out:"$proj\HerculesTray.exe" "$src\HerculesTray.cs" "$src\HerculesMidi.cs" "$src\HerculesShared.cs"
+& $csc /nologo /target:winexe /win32icon:"$icon" @resources /out:"$proj\HerculesTray.exe" "$src\HerculesTray.cs" "$src\HerculesMidi.cs" "$src\HerculesShared.cs" "$src\HerculesUi.cs"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fallo la compilacion de HerculesTray.exe"
@@ -41,7 +41,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[2/2] Compilando HerculesToggle.exe..." -ForegroundColor Yellow
-& $csc /nologo /target:winexe /win32icon:"$icon" /out:"$proj\HerculesToggle.exe" "$src\HerculesToggle.cs" "$src\HerculesShared.cs"
+& $csc /nologo /target:winexe /win32icon:"$icon" /out:"$proj\HerculesToggle.exe" "$src\HerculesToggle.cs" "$src\HerculesMidi.cs" "$src\HerculesShared.cs" "$src\HerculesUi.cs"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fallo la compilacion de HerculesToggle.exe"

@@ -19,7 +19,8 @@ HerculesP32Lights\
 │   ├── HerculesMidi.cs         # Comunicación WinMM MIDI y refresco F12 de Traktor
 │   ├── HerculesShared.cs       # Estado (state.ini) y órdenes entre interruptor y bandeja
 │   ├── HerculesTray.cs         # Bandeja, menú contextual y guardián de blackout
-│   └── HerculesToggle.cs       # Ventana del interruptor con botón ON/OFF
+│   ├── HerculesToggle.cs       # Ventana del interruptor (selector de modo y colores)
+│   └── HerculesUi.cs           # Paleta, textos y dibujos compartidos de la interfaz
 │
 ├── assets\                     # Iconos (se embeben en los .exe al compilar)
 │   ├── app.ico                 # Icono principal multi-resolución
@@ -49,15 +50,17 @@ HerculesP32Lights\
 
 - **Bandeja del Sistema (`HerculesTray.exe`):**  
   Permanece activo junto al reloj. Con **un solo clic izquierdo** conmuta entre:
-  - 🟢 **Modo Normal:** El controlador queda libre para tu software de DJ.
-  - 🌑 **Modo Apagado:** Apaga todas las luces del controlador al instante.
-  - Clic derecho: Abre un menú con selector de modos, modo lámpara opcional, inicio con Windows y salida.
+  - 🟢 **Programa de DJ (Normal):** El controlador queda libre para tu software de DJ.
+  - 🌑 **Apagado:** Apaga todas las luces del controlador al instante.
+  - Clic derecho: abre un menú que muestra el modo actual y si la controladora está conectada, con la acción principal (Encender / Apagar luces), los tres modos, los colores del modo lámpara, *Abrir interruptor…*, inicio con Windows y salida. El tooltip del ícono también avisa si no se detecta la controladora.
 
 - **Interruptor Visual de Barra de Tareas (`HerculesToggle.exe`):**
-  Una ventana compacta con un botón grande que muestra el estado actual y se mantiene sincronizada con la bandeja. No toca el MIDI: le envía la orden a `HerculesTray.exe` y, si la bandeja no está abierta, la inicia. Puede anclarse haciendo:
-  *Clic derecho en su icono en la barra de tareas ➡️ "Anclar a la barra de tareas"*.
+  Una ventana oscura con el estado actual, un indicador de conexión, un selector de modo (**Programa / Apagado / Lámpara**) y los colores del modo lámpara. Se mantiene sincronizada con la bandeja: no toca el MIDI, le envía la orden a `HerculesTray.exe` y, si la bandeja no está abierta, la inicia.
+  - Atajos: `1` Programa, `2` Apagado, `3` Lámpara, `Esc` cierra; con `Tab` y las flechas se recorren los controles.
+  - Si ya está abierta, volver a ejecutarla la trae al frente.
+  - Para anclarla: *clic derecho en su icono en la barra de tareas ➡️ "Anclar a la barra de tareas"*.
 
-- **Línea de comandos:** `HerculesTray.exe /off`, `/normal` o `/toggle` (si la bandeja ya está corriendo, le reenvía la orden).
+- **Línea de comandos:** `HerculesTray.exe /off`, `/normal`, `/toggle` o `/lamp:<color>` (`dj`, `purple`, `blue`, `red`). Si la bandeja ya está corriendo, le reenvía la orden.
 
 ---
 

@@ -25,6 +25,43 @@ namespace HerculesP32
 
         public static readonly string[] DemoColors = new string[] { "dj", "purple", "blue", "red" };
 
+        public static string LampEventName(string color)
+        {
+            return @"Local\HerculesP32Cmd_Lamp_" + color;
+        }
+
+        /// <summary>Evento con el que se le pide a la bandeja pasar a un modo.</summary>
+        public static string CommandEventName(AppMode mode, string color)
+        {
+            if (mode == AppMode.Off) return EventOff;
+            if (mode == AppMode.Demo) return LampEventName(color);
+            return EventNormal;
+        }
+
+        /// <summary>Argumento de línea de comandos equivalente, para iniciar la bandeja con esa orden.</summary>
+        public static string CommandArg(AppMode mode, string color)
+        {
+            if (mode == AppMode.Off) return "/off";
+            if (mode == AppMode.Demo) return "/lamp:" + color;
+            return "/normal";
+        }
+
+        public static bool IsTrayRunning()
+        {
+            try
+            {
+                Mutex m;
+                if (Mutex.TryOpenExisting(TrayMutexName, out m))
+                {
+                    m.Dispose();
+                    return true;
+                }
+            }
+            catch (UnauthorizedAccessException) { return true; }
+            catch { }
+            return false;
+        }
+
         public static string AppDir
         {
             get { return AppDomain.CurrentDomain.BaseDirectory; }

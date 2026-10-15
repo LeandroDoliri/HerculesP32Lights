@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -13,14 +14,14 @@ namespace HerculesP32
     {
         private NotifyIcon notifyIcon;
         private ContextMenuStrip contextMenu;
+        private ToolStripMenuItem itemHeader;
+        private ToolStripMenuItem itemDevice;
         private ToolStripMenuItem itemToggle;
         private ToolStripMenuItem itemModeNormal;
         private ToolStripMenuItem itemModeOff;
+        private ToolStripMenuItem itemModeDemo;
+        private ToolStripMenuItem[] itemColors;
         private ToolStripMenuItem itemAutoStart;
-        private ToolStripMenuItem itemColorDj;
-        private ToolStripMenuItem itemColorPurple;
-        private ToolStripMenuItem itemColorBlue;
-        private ToolStripMenuItem itemColorRed;
 
         private Icon iconOn;
         private Icon iconOff;
@@ -28,6 +29,7 @@ namespace HerculesP32
         // Se leen desde el hilo MIDI, por eso son volatile
         private volatile AppMode currentMode = AppMode.Normal;
         private volatile string demoColor = "dj";
+        private volatile bool deviceConnected;
 
         private EventWaitHandle[] commandEvents;
         private Thread listenerThread;
@@ -47,7 +49,7 @@ namespace HerculesP32
         private const string APP_NAME = "HerculesP32Tray";
         private const int WATCHDOG_INTERVAL_MS = 3500;
 
-        public HerculesTrayApp(AppMode? forcedMode)
+        public HerculesTrayApp(AppMode? forcedMode, string forcedColor)
         {
             uiContext = WindowsFormsSynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 
@@ -62,20 +64,29 @@ namespace HerculesP32
             midiThread.IsBackground = true;
             midiThread.Start();
 
-            commandEvents = new EventWaitHandle[]
+            // Índices 0-2: alternar / apagar / normal; desde el 3: un evento por color de lámpara
+            commandEvents = new EventWaitHandle[3 + HerculesShared.DemoColors.Length];
+            commandEvents[0] = new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventToggle);
+            commandEvents[1] = new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventOff);
+            commandEvents[2] = new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventNormal);
+            for (int i = 0; i < HerculesShared.DemoColors.Length; i++)
             {
-                new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventToggle),
-                new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventOff),
-                new EventWaitHandle(false, EventResetMode.AutoReset, HerculesShared.EventNormal),
-            };
+                commandEvents[3 + i] = new EventWaitHandle(false, EventResetMode.AutoReset,
+                    HerculesShared.LampEventName(HerculesShared.DemoColors[i]));
+            }
 
             listenerThread = new Thread(ListenForCommands);
             listenerThread.IsBackground = true;
             listenerThread.Start();
 
+            deviceConnected = HerculesMidi.IsConnected();
             InitializeTray();
 
-            if (forcedMode.HasValue)
+            if (forcedMode == AppMode.Demo)
+            {
+                SetDemoMode(forcedColor);
+            }
+            else if (forcedMode.HasValue)
             {
                 // Iniciada por el interruptor: aplica la orden como si la hubiera pedido el usuario
                 SetMode(forcedMode.Value);
@@ -111,38 +122,65 @@ namespace HerculesP32
         private void InitializeTray()
         {
             contextMenu = new ContextMenuStrip();
+            contextMenu.ShowImageMargin = true;
+            int img;
+            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) img = (int)Math.Round(16 * g.DpiX / 96f);
+            contextMenu.ImageScalingSize = new Size(img, img);
 
-            itemToggle = new ToolStripMenuItem("Alternar (Normal / Apagado)", null, (s, e) => ToggleLights());
+            // Encabezado informativo: estado actual y conexión (no clickeable)
+            itemHeader = new ToolStripMenuItem("Hercules P32");
+            itemHeader.Font = new Font(contextMenu.Font, FontStyle.Bold);
+            itemHeader.Enabled = false;
+            itemDevice = new ToolStripMenuItem("");
+            itemDevice.Enabled = false;
+
+            // Acción principal (equivale al clic izquierdo en el ícono)
+            itemToggle = new ToolStripMenuItem("", null, (s, e) => ToggleLights());
             itemToggle.Font = new Font(contextMenu.Font, FontStyle.Bold);
 
-            itemModeNormal = new ToolStripMenuItem("🟢 Modo Normal (Programa de DJ)", null, (s, e) => SetMode(AppMode.Normal));
-            itemModeOff = new ToolStripMenuItem("🌑 Modo Apagado (Luces Apagadas)", null, (s, e) => SetMode(AppMode.Off));
+            itemModeNormal = new ToolStripMenuItem("Programa de DJ", HerculesUi.CreateDotBitmap(img, HerculesUi.Green),
+                (s, e) => SetMode(AppMode.Normal));
+            itemModeOff = new ToolStripMenuItem("Apagado", HerculesUi.CreateDotBitmap(img, HerculesUi.OffGray),
+                (s, e) => SetMode(AppMode.Off));
+            itemModeDemo = new ToolStripMenuItem("Modo lámpara");
 
-            var demoMenu = new ToolStripMenuItem("💡 Modo Lámpara (Decorativo Opcional)");
-            itemColorDj = new ToolStripMenuItem("DJ Multicolor", null, (s, e) => SetDemoMode("dj"));
-            itemColorPurple = new ToolStripMenuItem("Púrpura Neón", null, (s, e) => SetDemoMode("purple"));
-            itemColorBlue = new ToolStripMenuItem("Azul Eléctrico", null, (s, e) => SetDemoMode("blue"));
-            itemColorRed = new ToolStripMenuItem("Rojo Fuego", null, (s, e) => SetDemoMode("red"));
+            itemColors = new ToolStripMenuItem[HerculesShared.DemoColors.Length];
+            for (int i = 0; i < itemColors.Length; i++)
+            {
+                string color = HerculesShared.DemoColors[i];
+                itemColors[i] = new ToolStripMenuItem(HerculesUi.ColorName(color), HerculesUi.CreateSwatchBitmap(img, color),
+                    (s, e) => SetDemoMode(color));
+                itemModeDemo.DropDownItems.Add(itemColors[i]);
+            }
+            itemModeDemo.DropDown.ImageScalingSize = new Size(img, img);
 
-            demoMenu.DropDownItems.Add(itemColorDj);
-            demoMenu.DropDownItems.Add(itemColorPurple);
-            demoMenu.DropDownItems.Add(itemColorBlue);
-            demoMenu.DropDownItems.Add(itemColorRed);
+            var itemOpenSwitch = new ToolStripMenuItem("Abrir interruptor…", null, (s, e) => OpenSwitch());
 
-            itemAutoStart = new ToolStripMenuItem("🚀 Iniciar con Windows", null, (s, e) => ToggleAutoStart());
+            itemAutoStart = new ToolStripMenuItem("Iniciar con Windows", null, (s, e) => ToggleAutoStart());
             itemAutoStart.Checked = IsAutoStartEnabled();
 
-            var itemExit = new ToolStripMenuItem("❌ Salir", null, (s, e) => ExitApp());
+            var itemExit = new ToolStripMenuItem("Salir", null, (s, e) => ExitApp());
 
+            contextMenu.Items.Add(itemHeader);
+            contextMenu.Items.Add(itemDevice);
+            contextMenu.Items.Add(new ToolStripSeparator());
             contextMenu.Items.Add(itemToggle);
             contextMenu.Items.Add(new ToolStripSeparator());
             contextMenu.Items.Add(itemModeNormal);
             contextMenu.Items.Add(itemModeOff);
-            contextMenu.Items.Add(demoMenu);
+            contextMenu.Items.Add(itemModeDemo);
             contextMenu.Items.Add(new ToolStripSeparator());
+            contextMenu.Items.Add(itemOpenSwitch);
             contextMenu.Items.Add(itemAutoStart);
             contextMenu.Items.Add(new ToolStripSeparator());
             contextMenu.Items.Add(itemExit);
+
+            // El estado de conexión se refresca justo antes de mostrar el menú
+            contextMenu.Opening += (s, e) =>
+            {
+                deviceConnected = HerculesMidi.IsConnected();
+                UpdateUI();
+            };
 
             notifyIcon = new NotifyIcon();
             notifyIcon.ContextMenuStrip = contextMenu;
@@ -171,6 +209,11 @@ namespace HerculesP32
                     if (idx == 0) uiContext.Post(state => ToggleLights(), null);
                     else if (idx == 1) uiContext.Post(state => SetMode(AppMode.Off), null);
                     else if (idx == 2) uiContext.Post(state => SetMode(AppMode.Normal), null);
+                    else if (idx >= 3 && idx < commandEvents.Length)
+                    {
+                        string color = HerculesShared.DemoColors[idx - 3];
+                        uiContext.Post(state => SetDemoMode(color), null);
+                    }
                 }
                 catch (ThreadAbortException) { break; }
                 catch (ObjectDisposedException) { break; }
@@ -209,6 +252,11 @@ namespace HerculesP32
                     bool connected = HerculesMidi.IsConnected();
                     bool reconnected = connected && !deviceWasConnected;
                     deviceWasConnected = connected;
+                    if (connected != deviceConnected)
+                    {
+                        deviceConnected = connected;
+                        uiContext.Post(state => UpdateUI(), null);
+                    }
                     if (!connected) return;
 
                     AppMode mode = currentMode;
@@ -285,45 +333,59 @@ namespace HerculesP32
             catch { }
         }
 
-        private static string ColorDisplayName(string color)
-        {
-            switch (color)
-            {
-                case "purple": return "Púrpura";
-                case "blue": return "Azul";
-                case "red": return "Rojo";
-                default: return "DJ";
-            }
-        }
-
         private void UpdateUI()
         {
             try
             {
-                if (currentMode == AppMode.Normal)
-                {
-                    notifyIcon.Icon = iconOn;
-                    notifyIcon.Text = "Hercules P32: Luces NORMALES (Programa)";
-                }
-                else if (currentMode == AppMode.Off)
-                {
-                    notifyIcon.Icon = iconOff;
-                    notifyIcon.Text = "Hercules P32: Luces APAGADAS";
-                }
-                else
-                {
-                    notifyIcon.Icon = iconOn;
-                    notifyIcon.Text = "Hercules P32: Modo Lámpara (" + ColorDisplayName(demoColor) + ")";
-                }
+                AppMode mode = currentMode;
+                string color = demoColor;
 
-                itemModeNormal.Checked = currentMode == AppMode.Normal;
-                itemModeOff.Checked = currentMode == AppMode.Off;
-                itemColorDj.Checked = (currentMode == AppMode.Demo && demoColor == "dj");
-                itemColorPurple.Checked = (currentMode == AppMode.Demo && demoColor == "purple");
-                itemColorBlue.Checked = (currentMode == AppMode.Demo && demoColor == "blue");
-                itemColorRed.Checked = (currentMode == AppMode.Demo && demoColor == "red");
+                string status = mode == AppMode.Demo
+                    ? "Modo lámpara (" + HerculesUi.ColorName(color).ToLower() + ")"
+                    : HerculesUi.ModeTitle(mode);
+
+                notifyIcon.Icon = mode == AppMode.Off ? iconOff : iconOn;
+                string tip = "Hercules P32: " + status;
+                if (!deviceConnected) tip += " · sin controladora";
+                // NotifyIcon.Text admite como máximo 63 caracteres
+                notifyIcon.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
+
+                itemHeader.Text = status;
+                Image oldHeaderImage = itemHeader.Image;
+                itemHeader.Image = mode == AppMode.Demo
+                    ? HerculesUi.CreateSwatchBitmap(contextMenu.ImageScalingSize.Width, color)
+                    : HerculesUi.CreateDotBitmap(contextMenu.ImageScalingSize.Width, HerculesUi.ModeColor(mode, color));
+                if (oldHeaderImage != null) oldHeaderImage.Dispose();
+                itemDevice.Text = deviceConnected ? "Controladora conectada" : "Controladora no detectada";
+
+                itemToggle.Text = mode == AppMode.Off ? "Encender luces" : "Apagar luces";
+
+                itemModeNormal.Checked = mode == AppMode.Normal;
+                itemModeOff.Checked = mode == AppMode.Off;
+                itemModeDemo.Checked = mode == AppMode.Demo;
+                for (int i = 0; i < itemColors.Length; i++)
+                {
+                    itemColors[i].Checked = mode == AppMode.Demo && HerculesShared.DemoColors[i] == color;
+                }
             }
             catch { }
+        }
+
+        private void OpenSwitch()
+        {
+            string exe = Path.Combine(HerculesShared.AppDir, "HerculesToggle.exe");
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe)
+                {
+                    WorkingDirectory = HerculesShared.AppDir,
+                    UseShellExecute = false
+                });
+            }
+            catch (Exception ex)
+            {
+                ShowWarning("No se pudo abrir el interruptor: " + ex.Message);
+            }
         }
 
         private bool IsAutoStartEnabled()
@@ -384,14 +446,25 @@ namespace HerculesP32
             ExitThread();
         }
 
-        private static AppMode? ParseModeArg(string[] args)
+        /// <summary>Interpreta /off, /normal (/on) y /lamp:&lt;color&gt;.</summary>
+        private static AppMode? ParseModeArg(string[] args, out string color)
         {
+            color = "dj";
             if (args.Length == 0) return null;
             string a = args[0].ToLower();
             if (a == "/off") return AppMode.Off;
             if (a == "/normal" || a == "/on") return AppMode.Normal;
+            if (a.StartsWith("/lamp"))
+            {
+                int colon = a.IndexOf(':');
+                if (colon > 0 && HerculesShared.IsValidDemoColor(a.Substring(colon + 1))) color = a.Substring(colon + 1);
+                return AppMode.Demo;
+            }
             return null;
         }
+
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
 
         [STAThread]
         public static void Main(string[] args)
@@ -400,16 +473,21 @@ namespace HerculesP32
             singleInstanceMutex = new Mutex(true, HerculesShared.TrayMutexName, out createdNew);
 
             string cmd = args.Length > 0 ? args[0].ToLower() : "";
-            AppMode? forcedMode = ParseModeArg(args);
+            string forcedColor;
+            AppMode? forcedMode = ParseModeArg(args, out forcedColor);
 
             if (!createdNew)
             {
                 // Ya hay una bandeja corriendo: le reenvía la orden
                 if (cmd == "/toggle") HerculesShared.SignalTray(HerculesShared.EventToggle);
-                else if (forcedMode == AppMode.Off) HerculesShared.SignalTray(HerculesShared.EventOff);
-                else if (forcedMode == AppMode.Normal) HerculesShared.SignalTray(HerculesShared.EventNormal);
+                else if (forcedMode.HasValue)
+                    HerculesShared.SignalTray(HerculesShared.CommandEventName(forcedMode.Value, forcedColor));
                 return;
             }
+
+            // Menú nítido en pantallas con escalado
+            try { SetProcessDPIAware(); }
+            catch { }
 
             if (cmd == "/toggle")
             {
@@ -421,7 +499,7 @@ namespace HerculesP32
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new HerculesTrayApp(forcedMode));
+            Application.Run(new HerculesTrayApp(forcedMode, forcedColor));
             GC.KeepAlive(singleInstanceMutex);
         }
     }
